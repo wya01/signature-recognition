@@ -1,10 +1,14 @@
-# ✅ utils/inference.py
+import os
+import json
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import transforms, models
 from PIL import Image
-import json
+
+# === 基础路径（项目根目录） ===
+BASE_DIR = os.path.dirname(os.path.dirname(__file__))  # signature_project/
+MODEL_DIR = os.path.join(BASE_DIR, "models")
 
 # === 图像转换器 ===
 transform_infer = transforms.Compose([
@@ -13,42 +17,52 @@ transform_infer = transforms.Compose([
     transforms.Normalize((0.5,), (0.5,))
 ])
 
-# === 加载 label_map.json，并恢复 index → 原始文件夹编号 ===
-with open("E:/MyProject/signature_project/experiments/resnet18_E7/label_map.json") as f:
-    label_map = json.load(f)
+# === label_map.json 加载 ===
+LABEL_PATH = os.path.join(MODEL_DIR, "resnet18_E7", "label_map.json")
+if os.path.exists(LABEL_PATH):
+    with open(LABEL_PATH, "r") as f:
+        label_map = json.load(f)
+else:
+    print("⚠️ Warning: label_map.json not found, using dummy labels.")
+    label_map = {"0": "User_01"}
 
 label_list = [None] * len(label_map)
 for folder_name, idx in label_map.items():
-    label_list[idx] = folder_name  # 保证 index 对应的是真实编号字符串，如 "1", "2", ...
+    label_list[idx] = folder_name  # 保证 index 对应的是真实编号字符串
 
 # === 分类模型加载（ResNet18） ===
-def load_resnet18_classifier(model_path, num_classes):
+def load_resnet18_classifier():
+    model_path = os.path.join(MODEL_DIR, "resnet18_E7", "best_model.pth")
     model = models.resnet18(pretrained=False)
-    model.fc = nn.Linear(model.fc.in_features, num_classes)
+    model.fc = nn.Linear(model.fc.in_features, len(label_map))
     model.load_state_dict(torch.load(model_path, map_location="cpu"))
     model.eval()
     return model
 
-classifier_model = load_resnet18_classifier(
-    "E:/MyProject/signature_project/experiments/resnet18_E7/best_model.pth",
-    num_classes=len(label_map)
-)
+# 延迟加载
+_classifier_model = None
+def get_classifier_model():
+    global _classifier_model
+    if _classifier_model is None:
+        _classifier_model = load_resnet18_classifier()
+    return _classifier_model
 
 # === 分类预测函数 ===
 def predict_user(processed_img):
     rgb_img = Image.fromarray(processed_img).convert("RGB")
     x = transform_infer(rgb_img).unsqueeze(0)  # Shape: [1, 3, 224, 224]
+    model = get_classifier_model()
 
     with torch.no_grad():
-        logits = classifier_model(x)
+        logits = model(x)
         probs = F.softmax(logits, dim=1)
         pred_class = torch.argmax(probs).item()
         confidence = torch.max(probs).item()
 
-    user_id = label_list[pred_class]  # 返回原始文件夹编号（字符串形式）
+    user_id = label_list[pred_class]
     return user_id, confidence
 
-# === Triplet 模型（用于真伪验证） ===
+# === Triplet 模型定义 ===
 class DeeperCNN(nn.Module):
     def __init__(self):
         super().__init__()
@@ -64,19 +78,31 @@ class DeeperCNN(nn.Module):
     def forward(self, x):
         return self.features(x)
 
-# === 加载 Triplet 模型 ===
-siamese_model = DeeperCNN()
-triplet_model_path = "E:/MyProject/signature_project/experiments/Triplet_E1(personsplit)/best_model.pth"
-siamese_model.load_state_dict(torch.load(triplet_model_path, map_location="cpu"))
-siamese_model.eval()
+# === Triplet 模型加载 ===
+def load_triplet_model():
+    model_path = os.path.join(MODEL_DIR, "Triplet_E1(personsplit)", "best_model.pth")
+    model = DeeperCNN()
+    model.load_state_dict(torch.load(model_path, map_location="cpu"))
+    model.eval()
+    return model
+
+_triplet_model = None
+def get_triplet_model():
+    global _triplet_model
+    if _triplet_model is None:
+        _triplet_model = load_triplet_model()
+    return _triplet_model
 
 # === 真伪验证函数 ===
 def verify_signature(img1, img2, threshold=2.480):
     to_tensor = transforms.ToTensor()
     x1 = to_tensor(img1).unsqueeze(0)  # [1, 1, H, W]
     x2 = to_tensor(img2).unsqueeze(0)
+
+    model = get_triplet_model()
+
     with torch.no_grad():
-        f1 = siamese_model(x1)
-        f2 = siamese_model(x2)
+        f1 = model(x1)
+        f2 = model(x2)
         distance = F.pairwise_distance(f1, f2).item()
     return distance, threshold
